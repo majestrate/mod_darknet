@@ -24,12 +24,11 @@ local c = string.char;
 
 module:depends("s2s");
 
--- TODO: rename these?
-local proxy_ip = module:get_option_string("onions_socks5_host", "127.0.0.1");
-local proxy_port = module:get_option_number("onions_socks5_port", 4447);
-local forbid_else = module:get_option_boolean("onions_only", false);
-local torify_all = module:get_option_boolean("onions_tor_all", false);
-local onions_map = module:get_option("onions_map", {});
+local proxy_ip = module:get_option_string("darknet_socks5_host", "127.0.0.1");
+local proxy_port = module:get_option_number("darknet_socks5_port", 4447);
+local forbid_else = module:get_option_boolean("darknet_only", false);
+local torify_all = module:get_option_boolean("darknet_force_all", false);
+local onions_map = module:get_option("darknet_map", {});
 
 local sessions = module:shared("sessions");
 
