@@ -95,6 +95,12 @@ local function socks5_connect_sent(conn, data)
 	local response = byte(data, 4);
 	module:log("debug", "Got Response %d", response);
 
+	if response ~= 0x01 and response ~= 0x03 and response ~= 0x04 then
+		module:log("debug", "Unsupported SOCKS5 address type %d; rejecting connection.", response);
+		session:close(false);
+		return;
+	end
+
 	local expected_len = 10;
 	if response == 0x01 then
 		expected_len = 10;
