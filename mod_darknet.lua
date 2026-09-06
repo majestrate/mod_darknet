@@ -31,7 +31,7 @@ local proxy_port = module:get_option_number("darknet_socks5_port", 4447);
 local forbid_else = module:get_option_boolean("darknet_only", false);
 local torify_all = module:get_option_boolean("darknet_force_all", false);
 local onions_map = module:get_option("darknet_map", {});
-local max_sendq = module:get_option_number("darknet_queue_limit", module:get_option_number("s2s_queue_limit", 50));
+local max_sendq = module:get_option_number("darknet_queue_limit", 50);
 
 local sessions = module:shared("sessions");
 
