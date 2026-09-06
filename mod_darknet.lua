@@ -231,6 +231,21 @@ local function connect_socks5(host_session, connect_host, connect_port)
 	host_session.conn = conn;
 end
 
+local function consume_sendq(sendq)
+	if type(sendq.consume) == "function" then
+		return sendq:consume();
+	end
+	local i = 0;
+	return function()
+		i = i + 1;
+		local item = sendq[i];
+		if item then
+			sendq[i] = nil;
+			return item[1], item[2];
+		end
+	end
+end
+
 local bouncy_stanzas = { message = true, presence = true, iq = true };
 local function bounce_sendq(session, reason)
 	local sendq = session.sendq;
@@ -244,33 +259,16 @@ local function bounce_sendq(session, reason)
 		end;
 		dummy = true;
 	};
-	if type(sendq.consume) == "function" then
-		for stanza, reply in sendq:consume() do
-			if reply and not(reply.attr and reply.attr.xmlns) and bouncy_stanzas[reply.name] then
-				reply.attr.type = "error";
-				reply:tag("error", {type = "cancel"})
-					:tag("remote-server-not-found", {xmlns = "urn:ietf:params:xml:ns:xmpp-stanzas"}):up();
-				if reason then
-					reply:tag("text", {xmlns = "urn:ietf:params:xml:ns:xmpp-stanzas"})
-						:text("Server-to-server connection failed: "..reason):up();
-				end
-				core_process_stanza(dummy, reply);
+	for stanza, reply in consume_sendq(sendq) do
+		if reply and not(reply.attr and reply.attr.xmlns) and bouncy_stanzas[reply.name] then
+			reply.attr.type = "error";
+			reply:tag("error", {type = "cancel"})
+				:tag("remote-server-not-found", {xmlns = "urn:ietf:params:xml:ns:xmpp-stanzas"}):up();
+			if reason then
+				reply:tag("text", {xmlns = "urn:ietf:params:xml:ns:xmpp-stanzas"})
+					:text("Server-to-server connection failed: "..reason):up();
 			end
-		end
-	else
-		for i, data in ipairs(sendq) do
-			local reply = data[2];
-			if reply and not(reply.attr and reply.attr.xmlns) and bouncy_stanzas[reply.name] then
-				reply.attr.type = "error";
-				reply:tag("error", {type = "cancel"})
-					:tag("remote-server-not-found", {xmlns = "urn:ietf:params:xml:ns:xmpp-stanzas"}):up();
-				if reason then
-					reply:tag("text", {xmlns = "urn:ietf:params:xml:ns:xmpp-stanzas"})
-						:text("Server-to-server connection failed: "..reason):up();
-				end
-				core_process_stanza(dummy, reply);
-			end
-			sendq[i] = nil;
+			core_process_stanza(dummy, reply);
 		end
 	end
 	session.sendq = nil;
