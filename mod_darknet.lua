@@ -43,7 +43,7 @@ local function create_sendq(stanza)
 	local item = { stanza, reply };
 	local q = { item };
 
-	function q.count()
+	function q:count()
 		return #q;
 	end
 
@@ -234,7 +234,7 @@ local bouncy_stanzas = { message = true, presence = true, iq = true };
 local function bounce_sendq(session, reason)
 	local sendq = session.sendq;
 	if not sendq then return; end
-	local count = (type(sendq.count) == "function" and sendq.count()) or #sendq;
+	local count = (type(sendq.count) == "function" and sendq:count()) or #sendq;
 	session.log("info", "Sending error replies for "..count.." queued stanzas because of failed outgoing connection to "..tostring(session.to_host));
 	local dummy = {
 		type = "s2sin";
