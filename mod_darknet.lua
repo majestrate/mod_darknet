@@ -58,12 +58,9 @@ local function create_sendq(stanza)
 	end
 
 	function q:consume()
-		local i = 0;
 		return function()
-			i = i + 1;
-			local entry = q[i];
-			if entry then
-				q[i] = nil;
+			if #q > 0 then
+				local entry = table.remove(q, 1);
 				return entry[1], entry[2];
 			end
 		end
