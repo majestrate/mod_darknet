@@ -10,10 +10,12 @@ local portmanager = require "core.portmanager";
 
 local softreq = require "util.dependencies".softreq;
 
+local debug = debug;
+
 local bit;
 pcall(function() bit = require"bit"; end);
-bit = bit or softreq"bit32"
-if not bit then module:log("error", "No bit module found. Either LuaJIT 2, lua-bitop or Lua 5.2 is required"); end
+bit = bit or softreq"bit32" or softreq"util.bitcompat";
+if not bit then module:log("error", "No bit module found. See https://prosody.im/doc/depends#bitop"); end
 
 local band = bit.band;
 local rshift = bit.rshift;
@@ -29,12 +31,47 @@ local proxy_port = module:get_option_number("darknet_socks5_port", 4447);
 local forbid_else = module:get_option_boolean("darknet_only", false);
 local torify_all = module:get_option_boolean("darknet_force_all", false);
 local onions_map = module:get_option("darknet_map", {});
+local max_sendq = module:get_option_number("darknet_queue_limit", 50);
 
 local sessions = module:shared("sessions");
 
 -- The socks5listener handles connection while still connecting to the proxy,
 -- then it hands them over to the normal listener (in mod_s2s)
 local socks5listener = { default_port = proxy_port, default_mode = "*a", default_interface = "*" };
+
+local function create_sendq(stanza)
+	local reply = stanza.attr and stanza.attr.type ~= "error" and stanza.attr.type ~= "result" and st.reply(stanza);
+	local item = { stanza, reply };
+	local q = { item };
+
+	function q:count()
+		return #q;
+	end
+
+	function q:push(s)
+		if #q >= max_sendq then
+			return false;
+		end
+		local r = s.attr and s.attr.type ~= "error" and s.attr.type ~= "result" and st.reply(s);
+		table.insert(q, { s, r });
+		return true;
+	end
+
+	function q:full()
+		return #q >= max_sendq;
+	end
+
+	function q:consume()
+		return function()
+			if #q > 0 then
+				local entry = table.remove(q, 1);
+				return entry[1], entry[2];
+			end
+		end
+	end
+
+	return q;
+end
 
 local function socks5_connect_sent(conn, data)
 
@@ -45,9 +82,9 @@ local function socks5_connect_sent(conn, data)
 		return;
 	end
 
-	request_status = byte(data, 2);
+	local request_status = byte(data, 2);
 
-	if not request_status == 0x00 then
+	if request_status ~= 0x00 then
 		module:log("debug", "Failed to connect to the SOCKS5 proxy. :(");
 		session:close(false);
 		return;
@@ -57,24 +94,32 @@ local function socks5_connect_sent(conn, data)
 
 	local response = byte(data, 4);
 	module:log("debug", "Got Response %d", response);
+
+	if response ~= 0x01 and response ~= 0x03 and response ~= 0x04 then
+		module:log("debug", "Unsupported SOCKS5 address type %d; rejecting connection.", response);
+		session:close(false);
+		return;
+	end
+
+	local expected_len = 10;
 	if response == 0x01 then
-		if #data < 10 then
-			-- let's try again when we have enough
+		expected_len = 10;
+	elseif response == 0x03 then
+		if #data < 5 then
 			session.socks5_buffer = data;
 			return;
 		end
-
-		-- this means the server tells us to connect on an IPv4 address
-		local ip = string.format("%d.%d.%d.%d", byte(data, 5,8));
-		local port = band(byte(data, 9), lshift(byte(data, 10), 8));
-		module:log("debug", "Should connect to: %s:%d", ip, port);
-
-		if not (ip == "0.0.0.0" and port == 0) then
-			module:log("debug", "The SOCKS5 proxy tells us to connect to a different IP, don't know how. :(");
-			session:close(false);
-			return;
-		end
+		expected_len = 7 + byte(data, 5);
+	elseif response == 0x04 then
+		expected_len = 22;
 	end
+
+	if #data < expected_len then
+		-- let's try again when we have enough
+		session.socks5_buffer = data;
+		return;
+	end
+
 	-- Now the real s2s listener can take over the connection.
 	local listener = portmanager.get_service("s2s").listener;
 
@@ -98,11 +143,13 @@ local function socks5_connect_sent(conn, data)
 			end
 		end
 	end
-	session.open_stream = function ()
+	session.open_stream = function (self, from, to)
+		from = from or session.from_host;
+		to = to or session.to_host;
 		session.sends2s(st.stanza("stream:stream", {
 			xmlns='jabber:server', ["xmlns:db"]='jabber:server:dialback',
 			["xmlns:stream"]='http://etherx.jabber.org/streams',
-			from=session.from_host, to=session.to_host, version='1.0', ["xml:lang"]='en'}):top_tag());
+			from=from, to=to, version='1.0', ["xml:lang"]='en'}):top_tag());
 	end
 	conn.setlistener(conn, listener);
 	listener.register_outgoing(conn, session);
@@ -124,7 +171,7 @@ local function socks5_handshake_sent(conn, data)
 	module:log("debug", "SOCKS version: "..byte(data, 1));
 	module:log("debug", "Response: "..request_status);
 
-	if not request_status == 0x00 then
+	if request_status ~= 0x00 then
 		module:log("debug", "Failed to connect to the SOCKS5 proxy. :( It seems to require authentication.");
 		session:close(false);
 		return;
@@ -190,21 +237,36 @@ local function connect_socks5(host_session, connect_host, connect_port)
 	host_session.conn = conn;
 end
 
+local function consume_sendq(sendq)
+	if type(sendq.consume) == "function" then
+		return sendq:consume();
+	end
+	local i = 0;
+	return function()
+		i = i + 1;
+		local item = sendq[i];
+		if item then
+			sendq[i] = nil;
+			return item[1], item[2];
+		end
+	end
+end
+
 local bouncy_stanzas = { message = true, presence = true, iq = true };
 local function bounce_sendq(session, reason)
 	local sendq = session.sendq;
 	if not sendq then return; end
-	session.log("info", "Sending error replies for "..#sendq.." queued stanzas because of failed outgoing connection to "..tostring(session.to_host));
+	local count = (type(sendq.count) == "function" and sendq:count()) or #sendq;
+	session.log("info", "Sending error replies for "..count.." queued stanzas because of failed outgoing connection to "..tostring(session.to_host));
 	local dummy = {
 		type = "s2sin";
 		send = function(s)
-			(session.log or log)("error", "Replying to to an s2s error reply, please report this! Traceback: %s", traceback());
+			(session.log or log)("error", "Replying to an s2s error reply, please report this! Traceback: %s", debug.traceback());
 		end;
 		dummy = true;
 	};
-	for i, data in ipairs(sendq) do
-		local reply = data[2];
-		if reply and not(reply.attr.xmlns) and bouncy_stanzas[reply.name] then
+	for stanza, reply in consume_sendq(sendq) do
+		if reply and not(reply.attr and reply.attr.xmlns) and bouncy_stanzas[reply.name] then
 			reply.attr.type = "error";
 			reply:tag("error", {type = "cancel"})
 				:tag("remote-server-not-found", {xmlns = "urn:ietf:params:xml:ns:xmpp-stanzas"}):up();
@@ -214,10 +276,10 @@ local function bounce_sendq(session, reason)
 			end
 			core_process_stanza(dummy, reply);
 		end
-		sendq[i] = nil;
 	end
 	session.sendq = nil;
 end
+
 -- Try to intercept anything to *.onion or *.i2p
 local function route_to_onion(event)
 	local stanza = event.stanza;
@@ -232,14 +294,7 @@ local function route_to_onion(event)
 			onion_port = onions_map[to_host].port;
 		end
 	elseif not ( to_host:find("%.onion$") or to_host:find("%.i2p$") ) then
-		if onions_map[to_host] then
-			if type(onions_map[to_host]) == "string" then
-				onion_host = onions_map[to_host];
-			else
-				onion_host = onions_map[to_host].host;
-				onion_port = onions_map[to_host].port;
-			end
-		elseif forbid_else then
+		if forbid_else then
 			module:log("debug", event.to_host .. " is not an onion. Blocking it.");
 			return false;
 		elseif not torify_all then
@@ -256,7 +311,7 @@ local function route_to_onion(event)
 	local host_session = s2s_new_outgoing(event.from_host, to_host);
 
 	host_session.bounce_sendq = bounce_sendq;
-	host_session.sendq = { {tostring(stanza), stanza.attr and stanza.attr.type ~= "error" and stanza.attr.type ~= "result" and st.reply(stanza)} };
+	host_session.sendq = create_sendq(stanza);
 
 	hosts[event.from_host].s2sout[to_host] = host_session;
 
