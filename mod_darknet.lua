@@ -216,7 +216,21 @@ function socks5listener.onincoming(conn, data)
 	end
 end
 
+local function i2p_socks_host(host)
+	if type(host) ~= "string" then
+		return host;
+	end
+	-- whatever.*.b32.i2p -> *.b32.i2p
+	local dest = host:match("([%w%-]+%.b32%.i2p)$");
+	if dest and dest ~= host then
+		module:log("debug", "Changed I2P SOCKS destination %s -> %s", host, dest);
+		return dest;
+	end
+	return host;
+end
+
 local function connect_socks5(host_session, connect_host, connect_port)
+	connect_host = i2p_socks_host(connect_host);
 
 	local conn, handler = socket.tcp();
 
